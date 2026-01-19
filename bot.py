@@ -17,8 +17,18 @@ TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
 GOOGLE_API_KEY = os.environ.get("GOOGLE_API_KEY")
 
 STORE_ID = 'fileSearchStores/resoluciones-cne-txt-201520-4yk268rd1sc8'
-MODELO_PRINCIPAL = 'gemini-3-flash-preview'
-MODELO_FALLBACK = 'gemini-2.5-flash'
+
+# Lista de modelos para rotación (cada uno tiene cuota separada ~5 req/min)
+# Total: ~20 requests/minuto con 4 modelos
+MODELOS = [
+    'gemini-3-flash-preview',   # Más potente
+    'gemini-2.5-flash',         # Muy bueno
+    'gemini-2.0-flash',         # Rápido
+    'gemini-2.0-flash-lite',    # Ligero
+]
+
+# Índice para rotación round-robin
+modelo_actual_idx = 0
 
 # Instrucción del sistema
 INSTRUCCION_SISTEMA = """Eres un asistente experto en derecho electoral colombiano.
@@ -54,7 +64,8 @@ def inicializar_google():
         return False
 
 def consultar_cne(pregunta: str) -> str:
-    """Consulta las resoluciones del CNE"""
+    """Consulta las resoluciones del CNE con rotación de modelos"""
+    global modelo_actual_idx
 
     prompt_completo = f"""{INSTRUCCION_SISTEMA}
 
@@ -63,8 +74,15 @@ PREGUNTA DEL USUARIO:
 
 Responde de manera completa y al final incluye la sección "RESOLUCIONES CONSULTADAS:" con las resoluciones específicas del CNE que utilizaste."""
 
-    # Intentar con modelo principal y fallback
-    for modelo in [MODELO_PRINCIPAL, MODELO_FALLBACK]:
+    # Intentar con todos los modelos en rotación round-robin
+    intentos = 0
+    max_intentos = len(MODELOS) * 2  # Dar 2 vueltas completas si es necesario
+
+    while intentos < max_intentos:
+        modelo = MODELOS[modelo_actual_idx]
+        modelo_actual_idx = (modelo_actual_idx + 1) % len(MODELOS)  # Rotar al siguiente
+        intentos += 1
+
         try:
             response = google_client.models.generate_content(
                 model=modelo,
@@ -81,19 +99,29 @@ Responde de manera completa y al final incluye la sección "RESOLUCIONES CONSULT
             )
 
             if response.text:
-                modelo_corto = "G3-Flash" if "3-flash" in modelo else "G2.5-Flash"
+                # Nombre corto del modelo para mostrar
+                if "3-flash" in modelo:
+                    modelo_corto = "G3-Flash"
+                elif "2.5-flash" in modelo:
+                    modelo_corto = "G2.5-Flash"
+                elif "2.0-flash-lite" in modelo:
+                    modelo_corto = "G2-Lite"
+                else:
+                    modelo_corto = "G2-Flash"
+
+                logger.info(f"Respuesta exitosa con {modelo}")
                 return f"🤖 *Respuesta* (_{modelo_corto}_):\n\n{response.text}"
 
         except Exception as e:
             error = str(e)
             if '429' in error or '503' in error:
-                logger.warning(f"Modelo {modelo} no disponible, intentando siguiente...")
+                logger.warning(f"Modelo {modelo} en rate limit, rotando...")
                 continue
             else:
                 logger.error(f"Error en {modelo}: {error}")
                 continue
 
-    return "⚠️ No se pudo obtener respuesta. Los modelos están temporalmente no disponibles. Intenta de nuevo en unos minutos."
+    return "⚠️ No se pudo obtener respuesta. Todos los modelos están temporalmente ocupados. Intenta de nuevo en 30 segundos."
 
 # Handlers de Telegram
 
@@ -159,9 +187,11 @@ async def info(update: Update, context: ContextTypes.DEFAULT_TYPE):
 📅 *Período:*
    2023, 2024, 2025
 
-🤖 *Modelos de IA:*
-   • Gemini 3 Flash (principal)
-   • Gemini 2.5 Flash (respaldo)
+🤖 *Modelos de IA:* (rotación automática)
+   • Gemini 3 Flash Preview
+   • Gemini 2.5 Flash
+   • Gemini 2.0 Flash
+   • Gemini 2.0 Flash Lite
 
 🔍 *Tecnología:*
    Google AI File Search
